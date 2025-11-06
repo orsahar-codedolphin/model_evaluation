@@ -1,0 +1,37 @@
+{
+  "file_upload": {
+    "before": "../fine-tuning/data/filtered_snippets/csharp/api_top_10/api_top_10_8/file_upload.jsonl",
+    "fixed": "../fine-tuning/data/fixed_snippets/csharp/api_top_10/api_top_10_8/file_upload.jsonl",
+    "fine_tuned": "../fine-tuning/data/fine_tuned_snippets/csharp/api_top_10/api_top_10_8/file_upload.jsonl"
+  },
+  "ssrf": {
+    "before": "../fine-tuning/data/filtered_snippets/csharp/api_top_10/api_top_10_7/ssrf.jsonl",
+    "fixed": "../fine-tuning/data/fixed_snippets/csharp/api_top_10/api_top_10_7/ssrf.jsonl",
+    "fine_tuned": "../fine-tuning/data/fine_tuned_snippets/csharp/api_top_10/api_top_10_7/ssrf.jsonl"
+  },
+  "bola": {
+    "before": "../fine-tuning/data/filtered_snippets/csharp/api_top_10/api_top_10_1/bola.jsonl",
+    "fixed": "../fine-tuning/data/fixed_snippets/csharp/api_top_10/api_top_10_1/bola.jsonl",
+    "fine_tuned": "../fine-tuning/data/fine_tuned_snippets/csharp/api_top_10/api_top_10_1/bola.jsonl"
+  },  
+  "mass_assignment": {
+    "before": "../fine-tuning/data/filtered_snippets/csharp/api_top_10/api_top_10_3/mass_assignment.jsonl",
+    "fixed": "../fine-tuning/data/fixed_snippets/csharp/api_top_10/api_top_10_3/mass_assignment.jsonl",
+    "fine_tuned": "../fine-tuning/data/fine_tuned_snippets/csharp/api_top_10/api_top_10_3/mass_assignment.jsonl"
+  },
+  "file_download": {
+    "before": "../fine-tuning/data/filtered_snippets/csharp/api_top_10/api_top_10_4/file_download.jsonl",
+    "fixed": "../fine-tuning/data/fixed_snippets/csharp/api_top_10/api_top_10_4/file_download.jsonl",
+    "fine_tuned": "../fine-tuning/data/fine_tuned_snippets/csharp/api_top_10/api_top_10_4/file_download.jsonl"
+  },
+  "pagination": {
+    "before": "../fine-tuning/data/filtered_snippets/csharp/api_top_10/api_top_10_4/pagination.jsonl",
+    "fixed": "../fine-tuning/data/fixed_snippets/csharp/api_top_10/api_top_10_4/pagination.jsonl",
+    "fine_tuned": "../fine-tuning/data/fine_tuned_snippets/csharp/api_top_10/api_top_10_4/pagination.jsonl"
+  },
+  "race_conditions_coupons": {
+    "before": "../fine-tuning/data/filtered_snippets/csharp/api_top_10/api_top_10_4/race_conditions_coupons.jsonl",
+    "fixed": "../fine-tuning/data/fixed_snippets/csharp/api_top_10/api_top_10_4/race_conditions_coupons.jsonl",
+    "fine_tuned": "../fine-tuning/data/fine_tuned_snippets/csharp/api_top_10/api_top_10_4/race_conditions_coupons.jsonl"
+  }
+}
