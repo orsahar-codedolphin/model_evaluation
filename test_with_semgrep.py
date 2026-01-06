@@ -3,14 +3,59 @@ import os, json, subprocess, tempfile, glob, html, sys
 from datetime import datetime
 import shutil
 from collections import defaultdict
+import webbrowser
+from flask import Flask, send_from_directory, render_template_string
+import threading
+import argparse
 
+CUSTOM_CONFIG_PATH = "config/semgrep_custom_config.json"
 
 def load_vuln_config(config_path="validate.json"):
     with open(config_path, "r") as f:
         return json.load(f)
 
 
-def scan_jsonl_file(jsonl_path, output_dir, run_label, vuln_type, max_snippets=None):
+def load_custom_semgrep_config(config_path="semgrep_custom_config.json"):
+    """Load custom semgrep configuration with additional --config paths"""
+    if not os.path.exists(config_path):
+        print(f"⚠ Custom config not found: {config_path}, using default rules only")
+        return {}
+    
+    with open(config_path, "r") as f:
+        custom_config = json.load(f)
+    
+    print(f"✓ Loaded custom semgrep config: {len(custom_config.get('--config', []))} custom rules")
+    return custom_config
+
+
+def build_semgrep_command(tmp_path, custom_config=None):
+    """Build semgrep command with default and custom configs"""
+    cmd = ["semgrep", "scan"]
+    
+    # Add default configs
+    cmd.extend(["--config", "p/security-audit"])
+    cmd.extend(["--config", "p/csharp"])
+    
+    # Add custom configs if provided
+    if custom_config and "--config" in custom_config:
+        config_paths = custom_config["--config"]
+        
+        # Handle both single string and list of strings
+        if isinstance(config_paths, str):
+            config_paths = [config_paths]
+        
+        for config_path in config_paths:
+            if os.path.exists(config_path):
+                cmd.extend(["--config", config_path])
+                print(f"    + Using custom rule: {config_path}")
+            else:
+                print(f"    ⚠ Custom rule not found: {config_path}")
+    
+    cmd.extend(["--json", tmp_path])
+    return cmd
+
+
+def scan_jsonl_file(jsonl_path, output_dir, run_label, vuln_type, custom_config=None, max_snippets=None):
     """Scan a JSONL file with semgrep and return results"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
@@ -26,6 +71,9 @@ def scan_jsonl_file(jsonl_path, output_dir, run_label, vuln_type, max_snippets=N
     rule_counts = defaultdict(int)
 
     print(f"Scanning file: {jsonl_path}")
+    if custom_config:
+        print(f"  Using custom semgrep rules")
+    
     snippet_count = 0
     
     with open(jsonl_path) as f:
@@ -61,8 +109,11 @@ def scan_jsonl_file(jsonl_path, output_dir, run_label, vuln_type, max_snippets=N
             try:
                 print(f"  Snippet {snippet_count}: scanning... (code lines: {len(code.splitlines())})", end="", flush=True)
                 
+                # Build command with custom configs
+                cmd = build_semgrep_command(tmp_path, custom_config)
+                
                 result = subprocess.run(
-                    ["semgrep", "scan", "--config", "p/security-audit", "--config", "p/csharp", "--json", tmp_path],
+                    cmd,
                     capture_output=True, text=True, timeout=60
                 )
                 
@@ -116,7 +167,8 @@ def scan_jsonl_file(jsonl_path, output_dir, run_label, vuln_type, max_snippets=N
             "total_findings": total_findings,
             "severity_counts": dict(severity_counts),
             "rule_counts": dict(rule_counts),
-            "findings_per_snippet": round(total_findings / total_snippets, 2) if total_snippets > 0 else 0
+            "findings_per_snippet": round(total_findings / total_snippets, 2) if total_snippets > 0 else 0,
+            "custom_rules_used": len(custom_config.get("--config", [])) if custom_config else 0
         }
     }
 
@@ -232,6 +284,12 @@ def generate_comparison_report(before_data, after_fixing_data, after_fine_tuning
     detailed_rows_fixing = create_detail_rows(fixing_by_snippet, "fixing")
     detailed_rows_tuning = create_detail_rows(tuning_by_snippet, "tuning")
     
+    # Custom rules info badge
+    custom_rules_badge = ""
+    custom_rules_count = before_stats.get("custom_rules_used", 0)
+    if custom_rules_count > 0:
+        custom_rules_badge = f'<span class="vuln-badge" style="background:#9C27B0">+ {custom_rules_count} Custom Rules</span>'
+    
     html_report = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Semgrep Analysis - {html.escape(vuln_type)}</title><style>
 body{{font-family:sans-serif;margin:20px;background:#f5f5f5}}
@@ -269,7 +327,7 @@ code{{font-family:'Courier New',monospace;font-size:13px}}
 .line-numbers{{counter-reset:line}}
 .line-numbers .line{{counter-increment:line}}
 .line-numbers .line:before{{content:counter(line);display:inline-block;width:40px;padding-right:10px;color:#999;text-align:right;border-right:2px solid #ddd;margin-right:10px}}
-.comparison-box{{background:#fff3cd;padding:15px;border-radius:5px;margin:10px 0;border-left:4px solid #ffc107}}
+.comparison-box{{background:#fff3cd;padding:15px;border-radius:5px;margin:10px 0;border-left:4px solid:#ffc107}}
 .comparison-box h4{{margin:0 0 10px 0;color:#856404}}
 </style>
 <script>
@@ -319,11 +377,12 @@ window.onclick = function(event) {{
 </script>
 </head><body>
 <div class="container">
-<h2>🔒 Semgrep Security Analysis: Three-Stage Comparison<span class="vuln-badge">{html.escape(vuln_type.upper())}</span></h2>
+<h2>🔒 Semgrep Security Analysis: Three-Stage Comparison<span class="vuln-badge">{html.escape(vuln_type.upper())}</span>{custom_rules_badge}</h2>
 
 <div class="summary">
 <p><b>Vulnerability Type:</b> {html.escape(vuln_type)}<br>
 <b>Analysis Date:</b> {timestamp}<br>
+<b>Custom Rules Used:</b> {custom_rules_count}<br>
 <b>Stage 1 (Raw):</b> {before_stats['total_snippets']} snippets<br>
 <b>Stage 2 (Fixed):</b> {after_fixing_stats['total_snippets']} snippets<br>
 <b>Stage 3 (Fine-Tuned):</b> {after_fine_tuning_stats['total_snippets']} snippets</p>
@@ -454,114 +513,210 @@ window.onclick = function(event) {{
     
     return report_path, json_path
 
+def serve_reports(base_dir="semgrep_results", port=5050):
+   """Serve all scan folders and their reports for browsing."""
+   app = Flask(__name__)
+
+   @app.route("/")
+   def index():
+      scans = sorted(
+         [d for d in glob.glob(os.path.join(base_dir, "scan_*")) if os.path.isdir(d)],
+         reverse=True
+      )
+      items = []
+      for scan_dir in scans:
+         reports = sorted(glob.glob(os.path.join(scan_dir, "*_comparison_report_*.html")), reverse=True)
+         rel = os.path.relpath(scan_dir, base_dir)
+         links = "".join(
+            f"<li><a href='/report/{rel}/{os.path.basename(r)}'>{os.path.basename(r)}</a></li>"
+            for r in reports
+         )
+         items.append(f"<h3>📂 {rel}</h3><ul>{links or '<li><i>No reports</i></li>'}</ul>")
+
+      html = f"""
+      <html><head><title>Semgrep Reports Viewer</title></head>
+      <body style='font-family:sans-serif;padding:30px;background:#f5f5f5'>
+         <h2>📊 Semgrep Scan Reports</h2>
+         {'<br>'.join(items) if items else '<p>No results yet.</p>'}
+         <hr><p style='color:#666'>Base directory: {base_dir}</p>
+      </body></html>
+      """
+      return render_template_string(html)
+
+   @app.route("/report/<path:subdir>/<path:filename>")
+   def report(subdir, filename):
+      folder = os.path.join(base_dir, subdir)
+      return send_from_directory(folder, filename)
+
+   def run_server():
+      print(f"\n🚀 Flask viewer running at http://127.0.0.1:{port}")
+      app.run(port=port, debug=False, use_reloader=False)
+
+   threading.Thread(target=run_server, daemon=True).start()
+   webbrowser.open(f"http://127.0.0.1:{port}")
+
+   """Start a small Flask server to browse and view reports interactively."""
+   app = Flask(__name__)
+
+   @app.route("/")
+   def index():
+      output_dir = "semgrep_results"
+      files = sorted(glob.glob(os.path.join(output_dir, "*_comparison_report_*.html")), reverse=True)
+      links = [f"<li><a href='/report/{os.path.basename(f)}'>{os.path.basename(f)}</a></li>" for f in files]
+      html = f"""
+      <html><head><title>Semgrep Reports</title></head>
+      <body style='font-family:sans-serif;padding:30px'>
+      <h2>📊 Available Reports ({len(files)})</h2>
+      <ul>{''.join(links)}</ul>
+      <p style='margin-top:20px;color:#555'>Serving directory: {output_dir}</p>
+      </body></html>
+      """
+      return render_template_string(html)
+
+   @app.route("/report/<path:filename>")
+   def report(filename):
+      return send_from_directory(output_dir, filename)
+
+   def run_server():
+      print(f"\n🚀 Flask viewer running at http://127.0.0.1:{port}")
+      app.run(port=port, debug=False, use_reloader=False)
+
+   threading.Thread(target=run_server, daemon=True).start()
+
 
 # ============= MAIN EXECUTION =============
 if __name__ == "__main__":
+    
+    parser = argparse.ArgumentParser(description="Semgrep 3-stage comparison tool")
+    parser.add_argument("mode", choices=["scan", "serve", "single"], help="scan: run full analysis, serve: launch report viewer")
+    parser.add_argument("--out", default=None, help="output directory to serve or save results to")
+    parser.add_argument("--port", type=int, default=5050, help="port for Flask server (serve mode)")
+    parser.add_argument("--custom", type=bool, default=False, help="custom semgrep rules")
+    args = parser.parse_args()
+    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     OUT_DIR = f"semgrep_results/scan_{timestamp}"
-    os.makedirs(OUT_DIR, exist_ok=True)
-
-    # Load configuration
-    config = load_vuln_config()
     
-    # Set to None to scan all snippets, or a number to limit
-    MAX_SNIPPETS = 10  # Remove or set to None for full scan
 
-    print("="*60)
-    print("SEMGREP THREE-STAGE COMPARISON (PER VULNERABILITY)")
-    print("="*60)
+    if args.mode == "serve":
+        base_dir = args.out or "semgrep_results"
+        if not os.path.isdir(base_dir):
+            print(f"Directory not found: {base_dir}")
+            exit(1)
+        print(f"Serving all reports from base directory: {base_dir}")
+        serve_reports(base_dir, args.port)
+        input("\nPress Enter to stop the server...\n")    
+    else:
+        os.makedirs(OUT_DIR, exist_ok=True)
+        # Load configuration
+        config = load_vuln_config()
+        
+        # Load custom semgrep configuration
+        custom_config = load_custom_semgrep_config(CUSTOM_CONFIG_PATH)
+        
+        # Set to None to scan all snippets, or a number to limit
+        MAX_SNIPPETS = 180  # Remove or set to None for full scan
 
-    all_results = {}
+        print("="*60)
+        print("SEMGREP THREE-STAGE COMPARISON (PER VULNERABILITY)")
+        #if custom_config:
+        #    print(f"Using {len(custom_config.get('--config', []))} custom rule(s)")
+        print("="*60)
 
-    # Process each vulnerability type separately
-    for vuln_type, paths in config.items():
-        print(f"\n{'='*60}")
-        print(f"Processing vulnerability: {vuln_type.upper()}")
+        all_results = {}
+
+        # Process each vulnerability type separately
+        for vuln_type, paths in config.items():
+            print(f"\n{'='*60}")
+            print(f"Processing vulnerability: {vuln_type.upper()}")
+            print(f"{'='*60}")
+            
+            before_path = paths["before"]
+            fixed_path = paths["fixed"]
+            fine_tuned_path = paths["fine_tuned"]
+
+            # Scan Stage 1: BEFORE
+            print(f"\n[1/4] Scanning BEFORE for {vuln_type}...")
+            #before_data = scan_jsonl_file(before_path, OUT_DIR, "before", vuln_type, custom_config, MAX_SNIPPETS)
+            before_data = scan_jsonl_file(before_path, OUT_DIR, "before", vuln_type, None, MAX_SNIPPETS)
+
+            # Scan Stage 2: AFTER FIXING
+            print(f"\n[2/4] Scanning AFTER FIXING for {vuln_type}...")
+            #after_fixing_data = scan_jsonl_file(fixed_path, OUT_DIR, "fixed", vuln_type, custom_config, MAX_SNIPPETS)
+            after_fixing_data = scan_jsonl_file(fixed_path, OUT_DIR, "fixed", vuln_type, None, MAX_SNIPPETS)
+
+            # Scan Stage 3: AFTER FINE-TUNING
+            print(f"\n[3/4] Scanning AFTER FINE-TUNING for {vuln_type}...")
+            #after_fine_tuning_data = scan_jsonl_file(fine_tuned_path, OUT_DIR, "fine_tuned", vuln_type, custom_config, MAX_SNIPPETS)
+            after_fine_tuning_data = scan_jsonl_file(fine_tuned_path, OUT_DIR, "fine_tuned", vuln_type, None, MAX_SNIPPETS)
+
+            # Generate comparison report for this vulnerability
+            print(f"\n[4/4] Generating comparison report for {vuln_type}...")
+            report_path, json_path = generate_comparison_report(
+                before_data, 
+                after_fixing_data, 
+                after_fine_tuning_data, 
+                OUT_DIR, 
+                vuln_type
+            )
+
+            # Store results
+            all_results[vuln_type] = {
+                "report_path": report_path,
+                "json_path": json_path,
+                "before_findings": before_data['stats']['total_findings'],
+                "fixing_findings": after_fixing_data['stats']['total_findings'],
+                "tuning_findings": after_fine_tuning_data['stats']['total_findings']
+            }
+
+            # Print summary for this vulnerability
+            print(f"\n{'='*60}")
+            print(f"✓ Report for {vuln_type} saved: {report_path}")
+            print(f"✓ JSON data saved: {json_path}")
+            print(f"\n📊 Quick Summary for {vuln_type}:")
+            print(f"  Raw:        {before_data['stats']['total_findings']} findings ({before_data['stats']['findings_per_snippet']:.2f} avg)")
+            print(f"  Fixed:      {after_fixing_data['stats']['total_findings']} findings ({after_fixing_data['stats']['findings_per_snippet']:.2f} avg)")
+            print(f"  Fine-Tuned: {after_fine_tuning_data['stats']['total_findings']} findings ({after_fine_tuning_data['stats']['findings_per_snippet']:.2f} avg)")
+            
+            change_fixing = after_fixing_data['stats']['total_findings'] - before_data['stats']['total_findings']
+            change_tuning = after_fine_tuning_data['stats']['total_findings'] - after_fixing_data['stats']['total_findings']
+            change_overall = after_fine_tuning_data['stats']['total_findings'] - before_data['stats']['total_findings']
+            
+            if before_data['stats']['total_findings'] > 0:
+                print(f"  Raw → Fixed:      {change_fixing:+d} ({change_fixing/before_data['stats']['total_findings']*100:+.1f}%)")
+            if after_fixing_data['stats']['total_findings'] > 0:
+                print(f"  Fixed → Tuned:    {change_tuning:+d} ({change_tuning/after_fixing_data['stats']['total_findings']*100:+.1f}%)")
+            if before_data['stats']['total_findings'] > 0:
+                print(f"  Raw → Tuned:      {change_overall:+d} ({change_overall/before_data['stats']['total_findings']*100:+.1f}%)")
+            print(f"{'='*60}")
+
+        # Print overall summary
+        print(f"\n\n{'='*60}")
+        print("OVERALL SUMMARY - ALL VULNERABILITIES")
         print(f"{'='*60}")
+        print(f"\nTotal vulnerabilities processed: {len(all_results)}")
+        print(f"Output directory: {OUT_DIR}\n")
         
-        before_path = paths["before"]
-        fixed_path = paths["fixed"]
-        fine_tuned_path = paths["fine_tuned"]
-
-        # Scan Stage 1: BEFORE
-        print(f"\n[1/4] Scanning BEFORE for {vuln_type}...")
-        before_data = scan_jsonl_file(before_path, OUT_DIR, "before", vuln_type, MAX_SNIPPETS)
-
-        # Scan Stage 2: AFTER FIXING
-        print(f"\n[2/4] Scanning AFTER FIXING for {vuln_type}...")
-        after_fixing_data = scan_jsonl_file(fixed_path, OUT_DIR, "fixed", vuln_type, MAX_SNIPPETS)
-
-        # Scan Stage 3: AFTER FINE-TUNING
-        print(f"\n[3/4] Scanning AFTER FINE-TUNING for {vuln_type}...")
-        after_fine_tuning_data = scan_jsonl_file(fine_tuned_path, OUT_DIR, "fine_tuned", vuln_type, MAX_SNIPPETS)
-
-        # Generate comparison report for this vulnerability
-        print(f"\n[4/4] Generating comparison report for {vuln_type}...")
-        report_path, json_path = generate_comparison_report(
-            before_data, 
-            after_fixing_data, 
-            after_fine_tuning_data, 
-            OUT_DIR, 
-            vuln_type
-        )
-
-        # Store results
-        all_results[vuln_type] = {
-            "report_path": report_path,
-            "json_path": json_path,
-            "before_findings": before_data['stats']['total_findings'],
-            "fixing_findings": after_fixing_data['stats']['total_findings'],
-            "tuning_findings": after_fine_tuning_data['stats']['total_findings']
-        }
-
-        # Print summary for this vulnerability
+        total_before = sum(r['before_findings'] for r in all_results.values())
+        total_fixing = sum(r['fixing_findings'] for r in all_results.values())
+        total_tuning = sum(r['tuning_findings'] for r in all_results.values())
+        
+        print(f"Aggregate findings across all vulnerabilities:")
+        print(f"  Raw:        {total_before} findings")
+        print(f"  Fixed:      {total_fixing} findings")
+        print(f"  Fine-Tuned: {total_tuning} findings")
+        
+        if total_before > 0:
+            print(f"\nAggregate changes:")
+            print(f"  Raw → Fixed:      {total_fixing - total_before:+d} ({(total_fixing - total_before)/total_before*100:+.1f}%)")
+            if total_fixing > 0:
+                print(f"  Fixed → Tuned:    {total_tuning - total_fixing:+d} ({(total_tuning - total_fixing)/total_fixing*100:+.1f}%)")
+            print(f"  Raw → Tuned:      {total_tuning - total_before:+d} ({(total_tuning - total_before)/total_before*100:+.1f}%)")
+        
+        print(f"\n📁 Individual reports generated:")
+        for vuln_type, result in all_results.items():
+            print(f"  • {vuln_type}: {result['report_path']}")
+        
         print(f"\n{'='*60}")
-        print(f"✓ Report for {vuln_type} saved: {report_path}")
-        print(f"✓ JSON data saved: {json_path}")
-        print(f"\n📊 Quick Summary for {vuln_type}:")
-        print(f"  Raw:        {before_data['stats']['total_findings']} findings ({before_data['stats']['findings_per_snippet']:.2f} avg)")
-        print(f"  Fixed:      {after_fixing_data['stats']['total_findings']} findings ({after_fixing_data['stats']['findings_per_snippet']:.2f} avg)")
-        print(f"  Fine-Tuned: {after_fine_tuning_data['stats']['total_findings']} findings ({after_fine_tuning_data['stats']['findings_per_snippet']:.2f} avg)")
-        
-        change_fixing = after_fixing_data['stats']['total_findings'] - before_data['stats']['total_findings']
-        change_tuning = after_fine_tuning_data['stats']['total_findings'] - after_fixing_data['stats']['total_findings']
-        change_overall = after_fine_tuning_data['stats']['total_findings'] - before_data['stats']['total_findings']
-        
-        if before_data['stats']['total_findings'] > 0:
-            print(f"  Raw → Fixed:      {change_fixing:+d} ({change_fixing/before_data['stats']['total_findings']*100:+.1f}%)")
-        if after_fixing_data['stats']['total_findings'] > 0:
-            print(f"  Fixed → Tuned:    {change_tuning:+d} ({change_tuning/after_fixing_data['stats']['total_findings']*100:+.1f}%)")
-        if before_data['stats']['total_findings'] > 0:
-            print(f"  Raw → Tuned:      {change_overall:+d} ({change_overall/before_data['stats']['total_findings']*100:+.1f}%)")
-        print(f"{'='*60}")
-
-    # Print overall summary
-    print(f"\n\n{'='*60}")
-    print("OVERALL SUMMARY - ALL VULNERABILITIES")
-    print(f"{'='*60}")
-    print(f"\nTotal vulnerabilities processed: {len(all_results)}")
-    print(f"Output directory: {OUT_DIR}\n")
-    
-    total_before = sum(r['before_findings'] for r in all_results.values())
-    total_fixing = sum(r['fixing_findings'] for r in all_results.values())
-    total_tuning = sum(r['tuning_findings'] for r in all_results.values())
-    
-    print(f"Aggregate findings across all vulnerabilities:")
-    print(f"  Raw:        {total_before} findings")
-    print(f"  Fixed:      {total_fixing} findings")
-    print(f"  Fine-Tuned: {total_tuning} findings")
-    
-    if total_before > 0:
-        print(f"\nAggregate changes:")
-        print(f"  Raw → Fixed:      {total_fixing - total_before:+d} ({(total_fixing - total_before)/total_before*100:+.1f}%)")
-        if total_fixing > 0:
-            print(f"  Fixed → Tuned:    {total_tuning - total_fixing:+d} ({(total_tuning - total_fixing)/total_fixing*100:+.1f}%)")
-        print(f"  Raw → Tuned:      {total_tuning - total_before:+d} ({(total_tuning - total_before)/total_before*100:+.1f}%)")
-    
-    print(f"\n📁 Individual reports generated:")
-    for vuln_type, result in all_results.items():
-        print(f"  • {vuln_type}: {result['report_path']}")
-    
-    print(f"\n{'='*60}")
-    print("✓ Analysis complete!")
-    print(f"{'='*60}\n")
+        print("✓ Analysis complete!")
+        print(f"{'='*60}\n")
