@@ -173,6 +173,7 @@ def scan_jsonl_file(jsonl_path, output_dir, run_label, vuln_type, custom_config=
     }
 
 
+
 def generate_comparison_report(before_data, after_fixing_data, after_fine_tuning_data, output_dir, vuln_type):
     """Generate HTML comparison report with three-way comparison"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -199,7 +200,12 @@ def generate_comparison_report(before_data, after_fixing_data, after_fine_tuning
             snippet_idx = result.get("snippet_index", "?")
             prompt = result.get("prompt", "")
             code = result.get("code", "")
-            snippets[snippet_idx] = {"code": code, "prompt": prompt}
+            
+            # CRITICAL FIX: Properly escape all text for JSON embedding
+            snippets[str(snippet_idx)] = {
+                "code": code,
+                "prompt": prompt
+            }
             
             for finding in result.get("results", []):
                 findings_detail.append({
@@ -290,6 +296,24 @@ def generate_comparison_report(before_data, after_fixing_data, after_fine_tuning
     if custom_rules_count > 0:
         custom_rules_badge = f'<span class="vuln-badge" style="background:#9C27B0">+ {custom_rules_count} Custom Rules</span>'
     
+    # CRITICAL FIX: Use base64 encoding to completely avoid escape sequence issues
+    import base64
+    snippets_before_b64 = base64.b64encode(json.dumps(snippets_before).encode('utf-8')).decode('ascii')
+    snippets_fixing_b64 = base64.b64encode(json.dumps(snippets_fixing).encode('utf-8')).decode('ascii')
+    snippets_tuning_b64 = base64.b64encode(json.dumps(snippets_tuning).encode('utf-8')).decode('ascii')
+    
+    # Debug: verify encoding
+    print(f"DEBUG: Base64 lengths - before:{len(snippets_before_b64)}, fixing:{len(snippets_fixing_b64)}, tuning:{len(snippets_tuning_b64)}")
+    
+    # Build the script section - using base64 encoded data
+    script_data_section = f"""<script>
+// BASE64 SOLUTION v2 - Decode base64 JSON data - this completely bypasses all escape sequence issues
+const snippetsBefore = JSON.parse(atob('{snippets_before_b64}'));
+const snippetsFixing = JSON.parse(atob('{snippets_fixing_b64}'));
+const snippetsTuning = JSON.parse(atob('{snippets_tuning_b64}'));
+console.log('Snippets loaded via base64:', Object.keys(snippetsBefore).length, 'before,', Object.keys(snippetsFixing).length, 'fixing,', Object.keys(snippetsTuning).length, 'tuning');
+</script>"""
+    
     html_report = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Semgrep Analysis - {html.escape(vuln_type)}</title><style>
 body{{font-family:sans-serif;margin:20px;background:#f5f5f5}}
@@ -330,16 +354,20 @@ code{{font-family:'Courier New',monospace;font-size:13px}}
 .comparison-box{{background:#fff3cd;padding:15px;border-radius:5px;margin:10px 0;border-left:4px solid:#ffc107}}
 .comparison-box h4{{margin:0 0 10px 0;color:#856404}}
 </style>
+{script_data_section}
 <script>
-const snippetsBefore = {json.dumps({str(k): v for k, v in snippets_before.items()})};
-const snippetsFixing = {json.dumps({str(k): v for k, v in snippets_fixing.items()})};
-const snippetsTuning = {json.dumps({str(k): v for k, v in snippets_tuning.items()})};
 
 function showTab(tabName) {{
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
   document.getElementById(tabName).classList.add('active');
   document.querySelector('[onclick="showTab(\\'' + tabName + '\\')"]').classList.add('active');
+}}
+
+function escapeHtml(text) {{
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }}
 
 function showSnippet(type, idx) {{
@@ -359,11 +387,11 @@ function showSnippet(type, idx) {{
   
   const lines = snippet.code.split('\\n');
   const numberedCode = lines.map(line => 
-    '<div class="line"><span>' + line.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span></div>'
+    '<div class="line"><span>' + escapeHtml(line) + '</span></div>'
   ).join('');
   
   code.innerHTML = '<div style="margin-bottom:15px;padding:10px;background:#e3f2fd;border-radius:5px"><strong>Prompt:</strong> ' + 
-    snippet.prompt.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+    escapeHtml(snippet.prompt) + '</div>' +
     '<pre class="line-numbers"><code>' + numberedCode + '</code></pre>';
   
   modal.style.display = 'block';
